@@ -5,155 +5,464 @@ from streamlit_folium import st_folium
 from folium.plugins import AntPath
 import math
 import plotly.express as px
+from pathlib import Path
 
-# 1. CONFIGURACIÓN DE PÁGINA
-st.set_page_config(page_title="GIRSU - Control de Operaciones", layout="wide")
+st.set_page_config(page_title="GIRSU - Nuevo Modelo Logístico", layout="wide")
 
-# Estilo para visibilidad de métricas y diseño limpio
 st.markdown("""
-    <style>
-    [data-testid="stMetricValue"] { color: #1a1a1a !important; font-weight: bold !important; }
-    [data-testid="stMetricLabel"] { color: #4a4a4a !important; }
-    div[data-testid="stMetric"] { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border: 1px solid #d1d5db; }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+[data-testid="stMetricValue"] { color: #1a1a1a !important; font-weight: bold !important; }
+[data-testid="stMetricLabel"] { color: #4a4a4a !important; }
+div[data-testid="stMetric"] {
+    background-color: #f0f2f6;
+    padding: 15px;
+    border-radius: 10px;
+    border: 1px solid #d1d5db;
+}
+</style>
+""", unsafe_allow_html=True)
 
-st.title("Control de Operaciones: Proyecto Relleno Sanitario")
+st.title("GIRSU - Nuevo Modelo Logístico")
+st.caption("Escenarios con Estaciones de Transferencia, Planta de Energía y alternativas de Futuro Relleno Sanitario")
 
-def get_route(start_lat, start_lon, end_lat, end_lon):
-    import requests
-    url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}?overview=full&geometries=geojson"
-    try:
-        r = requests.get(url, timeout=2).json()
-        return [[p[1], p[0]] for p in r['routes'][0]['geometry']['coordinates']]
-    except:
-        return [[start_lat, start_lon], [end_lat, end_lon]]
+archivo = Path(__file__).parent / "datos_logistica_26.xlsx"
 
 try:
-    archivo = "datos_logistica_26.xlsx"
-    
-    # --- CARGA DE DATOS ---
-    df_b_raw = pd.read_excel(archivo, sheet_name="BATEAS", header=None)
-    mask = df_b_raw.apply(lambda x: x.astype(str).str.contains('DESTINO', case=False, na=False))
-    idx_fila = df_b_raw[mask.any(axis=1)].index[0]
-    df_matriz = pd.read_excel(archivo, sheet_name="BATEAS", skiprows=idx_fila).dropna(axis=1, how='all')
-    df_escenarios = df_matriz.set_index(df_matriz.columns[0]).T
-    df_escenarios.index = df_escenarios.index.astype(str).str.strip()
+    if not archivo.exists():
+        st.error("No se encontró el archivo datos_logistica_26.xlsx.")
+        st.stop()
 
-    df_proy_raw = pd.read_excel(archivo, sheet_name="RESPALDO RESIDUOS", skiprows=1)
-    df_proy = df_proy_raw.dropna(subset=[df_proy_raw.columns[0]]).iloc[:, [0, 1, 4, 7]]
-    df_proy.columns = ['Año', 'SF_Pop', 'ST_Pop', 'Resto_Pop']
-    df_proy['Año_Txt'] = df_proy['Año'].astype(int).astype(str)
+    # =========================
+    # CARGA DE DATOS NUEVOS
+    # =========================
+    df_residuos = pd.read_excel(archivo, sheet_name="PROYECCION_RESIDUOS").dropna(how="all")
+    df_infra = pd.read_excel(archivo, sheet_name="INFRAESTRUCTURA").dropna(how="all")
+    df_escenarios = pd.read_excel(archivo, sheet_name="ESCENARIOS").dropna(how="all")
+    df_dist = pd.read_excel(archivo, sheet_name="DISTANCIAS").dropna(how="all")
+    df_distrib = pd.read_excel(archivo, sheet_name="DISTRIBUCION_INFRAESTRUCTURA").dropna(how="all")
+    df_rellenos = pd.read_excel(archivo, sheet_name="FUTUROS_RELLENOS").dropna(how="all")
+    df_param = pd.read_excel(archivo, sheet_name="PARAMETROS").dropna(how="all")
 
-    # --- SIDEBAR (CONFIGURACIÓN REORGANIZADA) ---
+    # Limpieza básica
+    for df in [df_residuos, df_infra, df_escenarios, df_dist, df_distrib, df_rellenos]:
+        df.columns = df.columns.astype(str).str.strip()
+
+    # Coordenadas y toneladas
+    df_infra["LATITUD"] = pd.to_numeric(df_infra["LATITUD"], errors="coerce")
+    df_infra["LONGITUD"] = pd.to_numeric(df_infra["LONGITUD"], errors="coerce")
+    df_rellenos["LATITUD"] = pd.to_numeric(df_rellenos["LATITUD"], errors="coerce")
+    df_rellenos["LONGITUD"] = pd.to_numeric(df_rellenos["LONGITUD"], errors="coerce")
+
+    df_residuos["TON_ACTUAL_DIA"] = pd.to_numeric(df_residuos["TON_ACTUAL_DIA"], errors="coerce").fillna(0)
+    df_residuos["TON_PROYECTADA_800"] = pd.to_numeric(df_residuos["TON_PROYECTADA_800"], errors="coerce").fillna(0)
+
+    df_dist["KM_OPERATIVO"] = pd.to_numeric(df_dist["KM_OPERATIVO"], errors="coerce")
+    df_dist["KM_RUTA_REAL"] = pd.to_numeric(df_dist["KM_RUTA_REAL"], errors="coerce")
+    df_dist["KM_USADO"] = df_dist["KM_RUTA_REAL"].fillna(df_dist["KM_OPERATIVO"])
+
+    # =========================
+    # SIDEBAR
+    # =========================
     with st.sidebar:
         st.header("⚙️ Configuración")
-        
-        # 1. Escenario primero
-        st.subheader("📍 Escenario")
-        escenario_sel = st.selectbox("Seleccionar Escenario de Destino:", df_escenarios.index)
-        d = df_escenarios.loc[escenario_sel]
-        
-        # 2. Año segundo
-        st.subheader("📅 Horizonte Temporal")
-        anio_sel = st.select_slider("Año de Proyección:", options=df_proy['Año_Txt'].tolist(), value="2026")
-        pop_data = df_proy[df_proy['Año_Txt'] == anio_sel].iloc[0]
-        tn_totales_anio = (float(pop_data['SF_Pop']) + float(pop_data['ST_Pop']) + float(pop_data['Resto_Pop'])) * 0.001
-        
-        # 3. Capacidad tercero
+
+        st.subheader("📍 Escenario operativo")
+        escenarios = df_escenarios["ESCENARIO"].dropna().tolist()
+        escenario_sel = st.selectbox("Seleccionar escenario:", escenarios)
+
+        escenario_row = df_escenarios[df_escenarios["ESCENARIO"] == escenario_sel].iloc[0]
+
+        es_actual = escenario_sel == "Actual 600"
+
+        st.subheader("🗺️ Futuro Relleno Sanitario")
+        if es_actual:
+            relleno_sel = "Actual Relleno Sanitario"
+            relleno_id = None
+            st.info("En el escenario actual no se selecciona futuro relleno.")
+        else:
+            relleno_sel = st.selectbox(
+                "Seleccionar ubicación:",
+                df_rellenos["NOMBRE"].dropna().tolist()
+            )
+            relleno_id = df_rellenos[df_rellenos["NOMBRE"] == relleno_sel]["ID_RELLENO"].iloc[0]
+
+        st.markdown("---")
+
         st.subheader("🚛 Equipo")
-        capacidad_t = st.selectbox("Capacidad de la Batea (TN):", [30, 25, 20])
+        capacidad_t = st.selectbox("Capacidad de la batea / camión (TN):", [30, 25, 20])
 
         st.markdown("---")
-        
-        # 4. El resto de la configuración
-        st.subheader("💰 Parámetros de Costo")
-        precio_litro = st.number_input("Precio Litro Gasoil ($):", value=1100.0)
-        cons_cargado = st.number_input("Consumo Ida - Cargado (L/km):", value=0.52)
-        cons_vacio = st.number_input("Consumo Vuelta - Vacío (L/km):", value=0.30)
-        
+
+        st.subheader("💰 Parámetros de costo")
+        precio_litro = st.number_input("Precio litro gasoil ($):", value=1100.0)
+        cons_cargado = st.number_input("Consumo ida cargado (L/km):", value=0.52)
+        cons_vacio = st.number_input("Consumo vuelta vacío (L/km):", value=0.30)
+
         st.markdown("---")
-        st.subheader("🗺️ Visualización del Mapa")
+
+        st.subheader("🗺️ Visualización del mapa")
         estilo_mapa = st.radio("Estilo de vista:", ["Claro (Calles)", "Satelital (Híbrido)"])
-        tile_provider = "OpenStreetMap" if estilo_mapa == "Claro (Calles)" else "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
-        attr = "OpenStreetMap" if estilo_mapa == "Claro (Calles)" else "Google Maps"
-        
-        radio_20 = st.checkbox("Mostrar Radio 20 km", value=False)
-        radio_35 = st.checkbox("Mostrar Radio 35 km", value=False)
-        radio_50 = st.checkbox("Mostrar Radio 50 km", value=False)
 
-    # --- LÓGICA DE CÁLCULO ---
-    def clean_val(key):
-        c = [col for col in d.index if key.lower() in str(col).lower()]
-        return float(d[c[0]]) if c else 0
+        if estilo_mapa == "Claro (Calles)":
+            tile_provider = "OpenStreetMap"
+            attr = "OpenStreetMap"
+        else:
+            tile_provider = "https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}"
+            attr = "Google Maps"
 
-    distancia_ida = clean_val('Km')
-    dist_total_vuelta = distancia_ida * 2
-    viajes_posibles_unidad = math.floor(clean_val('Viajes Posibles'))
-    tiempo_ciclo = clean_val('Ciclo') 
-    
-    viajes_totales_req = math.ceil(tn_totales_anio / capacidad_t)
-    flota_necesaria = math.ceil((viajes_totales_req / 2) / viajes_posibles_unidad) if viajes_posibles_unidad > 0 else 0
-    km_totales_unidad = dist_total_vuelta * viajes_posibles_unidad
-    costo_por_viaje = (distancia_ida * cons_cargado + distancia_ida * cons_vacio) * precio_litro
-    km_totales_sistema = dist_total_vuelta * viajes_totales_req
-    costo_total_diario = costo_por_viaje * viajes_totales_req
+        mostrar_rutas = st.checkbox("Mostrar líneas de flujo", value=True)
+        mostrar_radios = st.checkbox("Mostrar radios desde Actual RS", value=False)
 
-    # --- 1. MAPA (CABECERA) ---
-    et_lat, et_lon = -31.621, -60.751 
-    dest_lat, dest_lon = float(clean_val('Latitud')), float(clean_val('Longitud'))
-    m = folium.Map(location=[-31.6, -60.8], zoom_start=10, tiles=tile_provider, attr=attr)
-    
-    # Dibujo de radios
-    if radio_20: folium.Circle([et_lat, et_lon], radius=20000, color='blue', fill=True, fill_opacity=0.1).add_to(m)
-    if radio_35: folium.Circle([et_lat, et_lon], radius=35000, color='orange', fill=True, fill_opacity=0.07).add_to(m)
-    if radio_50: folium.Circle([et_lat, et_lon], radius=50000, color='red', fill=True, fill_opacity=0.05).add_to(m)
-    
-    ruta = get_route(et_lat, et_lon, dest_lat, dest_lon)
-    AntPath(locations=ruta, delay=1000, color='blue', weight=6).add_to(m)
-    folium.Marker([et_lat, et_lon], icon=folium.Icon(color='blue', icon='truck', prefix='fa'), tooltip="E. Transferencia").add_to(m)
-    folium.Marker([dest_lat, dest_lon], icon=folium.Icon(color='red', icon='flag', prefix='fa'), tooltip=escenario_sel).add_to(m)
-    
-    st_folium(m, width="100%", height=450, key="mapa_operativo")
+    # =========================
+    # DATOS DEL ESCENARIO
+    # =========================
+    generacion_total = float(escenario_row["GENERACION_TOTAL"])
+    ton_relleno = float(escenario_row["TON_A_RELLENO"])
+    ton_et = float(escenario_row["TON_A_ET"])
+    ton_planta = float(escenario_row["TON_A_PLANTA"])
+
+    if generacion_total == 600:
+        col_ton = "TON_ACTUAL_DIA"
+    else:
+        col_ton = "TON_PROYECTADA_800"
+
+    df_origenes = df_residuos[["ORIGEN", col_ton]].copy()
+    df_origenes.columns = ["ORIGEN", "TON_DIA"]
+    df_origenes = df_origenes.dropna(subset=["ORIGEN"])
+    df_origenes["TON_DIA"] = pd.to_numeric(df_origenes["TON_DIA"], errors="coerce").fillna(0)
+
+    # =========================
+    # FUNCIONES AUXILIARES
+    # =========================
+    def km_lookup(tipo_flujo, origen=None, destino=None, origen_id=None, destino_id=None):
+        temp = df_dist[df_dist["TIPO_FLUJO"] == tipo_flujo].copy()
+
+        if origen is not None:
+            temp = temp[temp["ORIGEN"] == origen]
+
+        if destino is not None:
+            temp = temp[temp["DESTINO"] == destino]
+
+        if origen_id is not None:
+            temp = temp[temp["ORIGEN_ID"] == origen_id]
+
+        if destino_id is not None:
+            temp = temp[temp["DESTINO_ID"] == destino_id]
+
+        if temp.empty:
+            return 0.0
+
+        return float(temp["KM_USADO"].iloc[0])
+
+    def weighted_km_direct_to_relleno():
+        if es_actual:
+            # Para el escenario actual usamos el Actual RS como destino operativo.
+            # Se aproxima con la distancia Origen → ET1.
+            total = 0
+            for _, r in df_origenes.iterrows():
+                km = km_lookup("Origen → ET", origen=r["ORIGEN"], destino_id="ET1")
+                total += r["TON_DIA"] * km
+            return total / max(df_origenes["TON_DIA"].sum(), 1)
+
+        total = 0
+        for _, r in df_origenes.iterrows():
+            km = km_lookup("Origen → Futuro RS", origen=r["ORIGEN"], destino_id=relleno_id)
+            total += r["TON_DIA"] * km
+        return total / max(df_origenes["TON_DIA"].sum(), 1)
+
+    def km_promedio_origen_a_et():
+        distrib_esc = df_distrib[df_distrib["ESCENARIO"] == escenario_sel]
+        distrib_esc = distrib_esc[distrib_esc["DESTINO_ID"].astype(str).str.startswith("ET")]
+
+        if distrib_esc.empty:
+            return 0
+
+        total_ton_km = 0
+        total_ton = 0
+
+        for _, dest in distrib_esc.iterrows():
+            destino_id = dest["DESTINO_ID"]
+            ton_destino = float(dest["TON_DIA"])
+
+            for _, origen in df_origenes.iterrows():
+                proporcion = origen["TON_DIA"] / max(df_origenes["TON_DIA"].sum(), 1)
+                ton_asignada = ton_destino * proporcion
+                km = km_lookup("Origen → ET", origen=origen["ORIGEN"], destino_id=destino_id)
+                total_ton_km += ton_asignada * km
+                total_ton += ton_asignada
+
+        return total_ton_km / max(total_ton, 1)
+
+    def km_promedio_et_a_relleno():
+        if es_actual or relleno_id is None:
+            return 0
+
+        distrib_esc = df_distrib[df_distrib["ESCENARIO"] == escenario_sel]
+        distrib_esc = distrib_esc[distrib_esc["DESTINO_ID"].astype(str).str.startswith("ET")]
+
+        if distrib_esc.empty:
+            return 0
+
+        total_ton_km = 0
+        total_ton = 0
+
+        for _, dest in distrib_esc.iterrows():
+            origen_id = dest["DESTINO_ID"]
+            ton_destino = float(dest["TON_DIA"])
+            km = km_lookup("ET → Futuro RS", origen_id=origen_id, destino_id=relleno_id)
+            total_ton_km += ton_destino * km
+            total_ton += ton_destino
+
+        return total_ton_km / max(total_ton, 1)
+
+    # =========================
+    # CÁLCULOS LOGÍSTICOS
+    # =========================
+    km_directo = weighted_km_direct_to_relleno()
+    km_origen_et = km_promedio_origen_a_et()
+    km_et_relleno = km_promedio_et_a_relleno()
+
+    km_promedio_ponderado = 0
+
+    if es_actual:
+        km_promedio_ponderado = km_directo
+    elif escenario_sel == "Futuro 800 - Alternativa 1":
+        km_promedio_ponderado = km_directo
+    elif escenario_sel == "Futuro 800 - Alternativa 2":
+        km_promedio_ponderado = (
+            (ton_relleno * km_directo) +
+            (ton_et * (km_origen_et + km_et_relleno))
+        ) / generacion_total
+    elif escenario_sel == "Futuro 800 - Alternativa 3":
+        # Se considera ET + Planta como procesamiento intermedio.
+        # Para planta se usa Actual RS / PE1.
+        km_planta = 0
+        for _, origen in df_origenes.iterrows():
+            km = km_lookup("Origen → Planta Energía", origen=origen["ORIGEN"], destino_id="PE1")
+            km_planta += origen["TON_DIA"] * km
+        km_planta = km_planta / max(df_origenes["TON_DIA"].sum(), 1)
+
+        km_promedio_ponderado = (
+            (ton_relleno * km_directo) +
+            (ton_et * (km_origen_et + km_et_relleno)) +
+            (ton_planta * km_planta)
+        ) / generacion_total
+
+    distancia_viaje_redondo = km_promedio_ponderado * 2
+    viajes_dia = math.ceil(generacion_total / capacidad_t)
+
+    litros_por_viaje = km_promedio_ponderado * cons_cargado + km_promedio_ponderado * cons_vacio
+    costo_por_viaje = litros_por_viaje * precio_litro
+
+    km_totales_dia = distancia_viaje_redondo * viajes_dia
+    costo_total_dia = costo_por_viaje * viajes_dia
+
+    porcentaje_relleno = ton_relleno / generacion_total if generacion_total else 0
+    porcentaje_et = ton_et / generacion_total if generacion_total else 0
+    porcentaje_planta = ton_planta / generacion_total if generacion_total else 0
+    porcentaje_valorizacion = porcentaje_planta
+
+    # =========================
+    # MAPA
+    # =========================
+    m = folium.Map(location=[-31.62, -60.75], zoom_start=10, tiles=tile_provider, attr=attr)
+
+    if mostrar_radios:
+        centro = df_infra[df_infra["ID"] == "ET1"].iloc[0]
+        for radio, color in [(20000, "blue"), (35000, "orange"), (50000, "red")]:
+            folium.Circle(
+                [centro["LATITUD"], centro["LONGITUD"]],
+                radius=radio,
+                color=color,
+                fill=True,
+                fill_opacity=0.06
+            ).add_to(m)
+
+    # Marcadores de infraestructura fija
+    for _, r in df_infra.iterrows():
+        if pd.isna(r["LATITUD"]) or pd.isna(r["LONGITUD"]):
+            continue
+
+        if str(r["TIPO"]).lower() == "planta":
+            color = "green"
+            icon = "bolt"
+        elif str(r["TIPO"]).lower() == "et":
+            color = "blue"
+            icon = "truck"
+        else:
+            color = "red"
+            icon = "flag"
+
+        folium.Marker(
+            [r["LATITUD"], r["LONGITUD"]],
+            tooltip=f"{r['ID']} - {r['NOMBRE']}",
+            popup=f"{r['NOMBRE']}<br>Tipo: {r['TIPO']}<br>Capacidad: {r['CAPACIDAD_TN_DIA']} t/día",
+            icon=folium.Icon(color=color, icon=icon, prefix="fa")
+        ).add_to(m)
+
+    # Marcador del futuro relleno seleccionado
+    if not es_actual:
+        rr = df_rellenos[df_rellenos["ID_RELLENO"] == relleno_id].iloc[0]
+        folium.Marker(
+            [rr["LATITUD"], rr["LONGITUD"]],
+            tooltip=f"Futuro RS - {rr['NOMBRE']}",
+            popup=f"Futuro Relleno Sanitario<br>{rr['NOMBRE']}",
+            icon=folium.Icon(color="red", icon="flag", prefix="fa")
+        ).add_to(m)
+
+    # Flujos visuales
+    if mostrar_rutas:
+        origenes_coords = df_dist[df_dist["TIPO_FLUJO"] == "Origen → Futuro RS"][
+            ["ORIGEN", "ORIGEN_LAT", "ORIGEN_LON"]
+        ].drop_duplicates()
+
+        # Actual y Alt 1: Orígenes al destino principal
+        if es_actual:
+            destino = df_infra[df_infra["ID"] == "ET1"].iloc[0]
+            for _, o in origenes_coords.iterrows():
+                AntPath(
+                    locations=[[o["ORIGEN_LAT"], o["ORIGEN_LON"]], [destino["LATITUD"], destino["LONGITUD"]]],
+                    delay=1000,
+                    color="blue",
+                    weight=4
+                ).add_to(m)
+
+        elif escenario_sel == "Futuro 800 - Alternativa 1":
+            rr = df_rellenos[df_rellenos["ID_RELLENO"] == relleno_id].iloc[0]
+            for _, o in origenes_coords.iterrows():
+                AntPath(
+                    locations=[[o["ORIGEN_LAT"], o["ORIGEN_LON"]], [rr["LATITUD"], rr["LONGITUD"]]],
+                    delay=1000,
+                    color="red",
+                    weight=4
+                ).add_to(m)
+
+        else:
+            # Alternativas 2 y 3: Origenes a ET, ET a futuro relleno
+            distrib_esc = df_distrib[df_distrib["ESCENARIO"] == escenario_sel]
+            et_ids = distrib_esc[distrib_esc["DESTINO_ID"].astype(str).str.startswith("ET")]["DESTINO_ID"].tolist()
+
+            for et_id in et_ids:
+                et = df_infra[df_infra["ID"] == et_id].iloc[0]
+
+                for _, o in origenes_coords.iterrows():
+                    AntPath(
+                        locations=[[o["ORIGEN_LAT"], o["ORIGEN_LON"]], [et["LATITUD"], et["LONGITUD"]]],
+                        delay=1000,
+                        color="blue",
+                        weight=3
+                    ).add_to(m)
+
+                rr = df_rellenos[df_rellenos["ID_RELLENO"] == relleno_id].iloc[0]
+                AntPath(
+                    locations=[[et["LATITUD"], et["LONGITUD"]], [rr["LATITUD"], rr["LONGITUD"]]],
+                    delay=1000,
+                    color="red",
+                    weight=5
+                ).add_to(m)
+
+            if escenario_sel == "Futuro 800 - Alternativa 3":
+                planta = df_infra[df_infra["ID"] == "PE1"].iloc[0]
+                for _, o in origenes_coords.iterrows():
+                    AntPath(
+                        locations=[[o["ORIGEN_LAT"], o["ORIGEN_LON"]], [planta["LATITUD"], planta["LONGITUD"]]],
+                        delay=1000,
+                        color="green",
+                        weight=4
+                    ).add_to(m)
+
+    st_folium(m, width="100%", height=500, key="mapa_modelo_nuevo")
 
     st.markdown("---")
 
-    # --- 2. INDICADORES ---
-    st.subheader(f"📊 Resumen Logístico ({anio_sel} - Bateas {capacidad_t} TN)")
+    # =========================
+    # INDICADORES PRINCIPALES
+    # =========================
+    st.subheader("📊 Resumen del escenario seleccionado")
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    k1.metric("Generación total", f"{generacion_total:.0f} t/día")
+    k2.metric("A Futuro RS", f"{ton_relleno:.0f} t/día", f"{porcentaje_relleno:.1%}")
+    k3.metric("A ET", f"{ton_et:.0f} t/día", f"{porcentaje_et:.1%}")
+    k4.metric("A Planta Energía", f"{ton_planta:.0f} t/día", f"{porcentaje_planta:.1%}")
+    k5.metric("Valorización energética", f"{porcentaje_valorizacion:.1%}")
+
+    st.markdown("---")
+
+    # =========================
+    # INDICADORES LOGÍSTICOS
+    # =========================
+    st.subheader("🚛 Indicadores logísticos estimados")
+
     g1, g2, g3, g4 = st.columns(4)
-    g1.metric("DEMANDA", f"{tn_totales_anio:.1f} t/día")
-    g2.metric("DISTANCIA TOTAL", f"{dist_total_vuelta:.1f} km")
-    g3.metric("VIAJES DÍA", f"{int(viajes_totales_req)}")
-    g4.metric("FLOTA TOTAL", f"{int(flota_necesaria)} Unidades")
 
-    st.markdown("---")
-    
+    g1.metric("Km promedio ida", f"{km_promedio_ponderado:.1f} km")
+    g2.metric("Viaje redondo promedio", f"{distancia_viaje_redondo:.1f} km")
+    g3.metric("Viajes diarios", f"{viajes_dia}")
+    g4.metric("Km totales diarios", f"{km_totales_dia:,.0f} km")
+
     c1, c2 = st.columns(2)
+
     with c1:
-        st.markdown("##### 🚛 Rendimiento por Unidad")
-        o1, o2 = st.columns(2)
-        o1.metric("VIAJES/TURNO", f"{int(viajes_posibles_unidad)}")
-        o2.metric("COSTO POR VIAJE", f"$ {costo_por_viaje:,.0f}")
+        st.markdown("##### 💰 Costos")
+        cc1, cc2 = st.columns(2)
+        cc1.metric("Costo promedio por viaje", f"$ {costo_por_viaje:,.0f}")
+        cc2.metric("Costo diario estimado", f"$ {costo_total_dia:,.0f}")
+
     with c2:
-        st.markdown("##### 💰 Impacto Operativo Diario")
-        s1, s2 = st.columns(2)
-        s1.metric("KM TOTALES", f"{int(km_totales_sistema)} km")
-        s2.metric("GASTO TOTAL", f"$ {costo_total_diario:,.0f}")
+        st.markdown("##### 📌 Destino seleccionado")
+        if es_actual:
+            st.info("Escenario actual: operación sobre Actual Relleno Sanitario.")
+        else:
+            st.success(f"Futuro Relleno Sanitario seleccionado: **{relleno_sel}**")
 
     st.markdown("---")
 
-    # --- 3. PESTAÑAS DE DATOS ---
-    t1, t2, t3, t4 = st.tabs(["📈 Gráfico Carga", "📋 Población", "📋 Matriz Escenarios", "📖 Memoria Técnica"])
+    # =========================
+    # TABLAS Y GRÁFICOS
+    # =========================
+    t1, t2, t3, t4, t5 = st.tabs([
+        "📈 Distribución",
+        "🏗️ Infraestructura",
+        "🚛 Distancias",
+        "📋 Proyección residuos",
+        "⚙️ Parámetros"
+    ])
+
     with t1:
-        df_proy['Carga_TN'] = (df_proy['SF_Pop'] + df_proy['ST_Pop'] + df_proy['Resto_Pop']) * 0.001
-        fig = px.line(df_proy, x='Año_Txt', y='Carga_TN', markers=True, title="Crecimiento Proyectado")
+        df_plot = pd.DataFrame({
+            "Destino": ["Futuro RS", "ET", "Planta Energía"],
+            "Toneladas": [ton_relleno, ton_et, ton_planta]
+        })
+        fig = px.bar(df_plot, x="Destino", y="Toneladas", text="Toneladas", title="Distribución de toneladas por destino")
         st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(df_plot, use_container_width=True)
+
     with t2:
-        st.dataframe(df_proy[['Año_Txt', 'SF_Pop', 'ST_Pop', 'Resto_Pop']].astype(str), use_container_width=True)
+        st.dataframe(df_infra, use_container_width=True)
+
+        if escenario_sel in df_distrib["ESCENARIO"].unique():
+            st.markdown("##### Utilización de infraestructura en el escenario")
+            uso = df_distrib[df_distrib["ESCENARIO"] == escenario_sel].merge(
+                df_infra[["ID", "NOMBRE", "CAPACIDAD_TN_DIA"]],
+                left_on="DESTINO_ID",
+                right_on="ID",
+                how="left"
+            )
+            uso["UTILIZACION_%"] = uso["TON_DIA"] / uso["CAPACIDAD_TN_DIA"]
+            st.dataframe(uso, use_container_width=True)
+
     with t3:
-        st.dataframe(df_escenarios.T.astype(str), use_container_width=True)
+        st.caption("KM_RUTA_REAL, si está completo, reemplaza a KM_OPERATIVO.")
+        st.dataframe(df_dist, use_container_width=True)
+
     with t4:
-        st.info(f"**Cálculo:** {dist_total_vuelta} km/viaje × {int(viajes_totales_req)} fletes = {int(km_totales_sistema)} km totales por jornada.")
+        st.dataframe(df_residuos, use_container_width=True)
+
+    with t5:
+        st.dataframe(df_param, use_container_width=True)
 
 except Exception as e:
     st.error(f"Hubo un inconveniente con los datos: {e}")
