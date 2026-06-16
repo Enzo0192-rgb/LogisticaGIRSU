@@ -22,7 +22,7 @@ div[data-testid="stMetric"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("GIRSU - Nuevo Modelo Logístico")
+st.title("GIRSU - DASHBOARD")
 st.caption("Escenarios con Estaciones de Transferencia, Planta de Energía y alternativas de Futuro Relleno Sanitario")
 
 # Archivo de datos: busca primero la base nueva y, si no está, usa nombres anteriores.
