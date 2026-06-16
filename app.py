@@ -25,11 +25,21 @@ div[data-testid="stMetric"] {
 st.title("GIRSU - Nuevo Modelo Logístico")
 st.caption("Escenarios con Estaciones de Transferencia, Planta de Energía y alternativas de Futuro Relleno Sanitario")
 
-archivo = Path(__file__).parent / "datos_logistica_26.xlsx"
+# Archivo de datos: busca primero la base nueva y, si no está, usa nombres anteriores.
+base_path = Path(__file__).parent
+candidatos_archivo = [
+    base_path / "datos_logistica_27_nuevo_modelo_con_distancias.xlsx",
+    base_path / "datos_logistica_26.xlsx",
+    base_path / "datos_logistica.xlsx",
+]
+archivo = next((p for p in candidatos_archivo if p.exists()), candidatos_archivo[0])
 
 try:
     if not archivo.exists():
-        st.error("No se encontró el archivo datos_logistica_26.xlsx.")
+        st.error(
+            "No se encontró el archivo de datos. Guardá el Excel junto a app.py con alguno de estos nombres: "
+            "datos_logistica_27_nuevo_modelo_con_distancias.xlsx, datos_logistica_26.xlsx o datos_logistica.xlsx."
+        )
         st.stop()
 
     # =========================
@@ -263,6 +273,44 @@ try:
     porcentaje_valorizacion = porcentaje_planta
 
     # =========================
+    # DISTRIBUCIÓN DE TONELADAS POR DESTINO
+    # La distribución se arma por componente según la alternativa seleccionada:
+    # Alt. 1: 800 t/día a relleno.
+    # Alt. 2: 500 t/día a relleno + 4 ET por 300 t/día.
+    # Alt. 3: 400 t/día a relleno + 4 ET por 300 t/día + planta de energía por 100 t/día.
+    # =========================
+    def construir_distribucion_destinos():
+        filas = []
+
+        if es_actual:
+            filas.append({
+                "Destino": "Actual Relleno Sanitario",
+                "Tipo": "Relleno sanitario",
+                "Toneladas": ton_relleno,
+            })
+        else:
+            filas.append({
+                "Destino": relleno_sel,
+                "Tipo": "Futuro relleno sanitario",
+                "Toneladas": ton_relleno,
+            })
+
+            distrib_esc = df_distrib[df_distrib["ESCENARIO"] == escenario_sel].copy()
+            if not distrib_esc.empty:
+                for _, r in distrib_esc.iterrows():
+                    filas.append({
+                        "Destino": r["DESTINO"],
+                        "Tipo": r["TIPO"],
+                        "Toneladas": float(r["TON_DIA"]),
+                    })
+
+        df = pd.DataFrame(filas)
+        df["Participación"] = df["Toneladas"] / max(generacion_total, 1)
+        return df
+
+    df_distribucion_destinos = construir_distribucion_destinos()
+
+    # =========================
     # MAPA
     # =========================
     m = folium.Map(location=[-31.62, -60.75], zoom_start=10, tiles=tile_provider, attr=attr)
@@ -431,14 +479,24 @@ try:
     ])
 
     with t1:
-        df_plot = pd.DataFrame({
-            "Destino": ["Futuro RS", "ET", "Planta Energía"],
-            "Toneladas": [ton_relleno, ton_et, ton_planta]
-        })
-        fig = px.bar(df_plot, x="Destino", y="Toneladas", text="Toneladas", title="Distribución de toneladas por destino")
+        st.markdown("##### Distribución de toneladas por destino")
+
+        fig = px.bar(
+            df_distribucion_destinos,
+            x="Destino",
+            y="Toneladas",
+            color="Tipo",
+            text="Toneladas",
+            title="Distribución de toneladas por destino según alternativa seleccionada"
+        )
+        fig.update_traces(texttemplate="%{text:.0f} t/día", textposition="outside")
+        fig.update_layout(yaxis_title="Toneladas por día", xaxis_title="Destino")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.dataframe(df_plot, use_container_width=True)
+        tabla_distribucion = df_distribucion_destinos.copy()
+        tabla_distribucion["Toneladas"] = tabla_distribucion["Toneladas"].map(lambda x: f"{x:.0f} t/día")
+        tabla_distribucion["Participación"] = tabla_distribucion["Participación"].map(lambda x: f"{x:.1%}")
+        st.dataframe(tabla_distribucion, use_container_width=True, hide_index=True)
 
     with t2:
         st.dataframe(df_infra, use_container_width=True)
