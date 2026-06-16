@@ -7,7 +7,7 @@ import math
 import plotly.express as px
 from pathlib import Path
 
-st.set_page_config(page_title="GIRSU - Nuevo Modelo Logístico", layout="wide")
+st.set_page_config(page_title="GIRSU - DASHBOARD", layout="wide")
 
 st.markdown("""
 <style>
